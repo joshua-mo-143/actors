@@ -1,11 +1,14 @@
 use tokio::sync::{oneshot, mpsc};
 
+// The base actor, which our ActorHandle will be able to control. Holds data and an ID.
 struct MyActor {
     receiver: mpsc::Receiver<ActorMessage>,
     next_id: i32,
     data: String
 }
 
+// An enum which will hold a Sender from a oneshot channel.
+// This enum can also hold data (so for example if we want to change some data on the Actor)
 enum ActorMessage {
     GetUniqueId {
         respond_to: oneshot::Sender<u32>,
@@ -28,6 +31,7 @@ impl MyActor {
         }
     }
 
+    // do something based on what the enum is
     fn handle_message(&mut self, msg: ActorMessage) {
         match msg {
             ActorMessage::GetUniqueId {respond_to} => {
@@ -45,6 +49,7 @@ impl MyActor {
     }
 }
 
+// run the actor - this is run in a separate thread when creating the ActorHandle
 async fn run_my_actor(mut actor: MyActor) {
     while let Some(msg) = actor.receiver.recv().await {
         actor.handle_message(msg);
@@ -57,6 +62,7 @@ pub struct MyActorHandle {
 }
 
 impl MyActorHandle {
+    // this creates the actor while creating the handle
     pub fn new() -> Self {
         let (sender, receiver) = mpsc::channel(8);
         let actor = MyActor::new(receiver);
@@ -77,7 +83,8 @@ impl MyActorHandle {
         let _ = self.sender.send(msg).await;
         recv.await.expect("Actor task has been killed")
     }
-    
+
+    // get data
     pub async fn get_data(&self) -> String {
         let (send, recv) = oneshot::channel();
         let msg = ActorMessage::GetData {
@@ -91,6 +98,7 @@ impl MyActorHandle {
         recv.await.expect("Actor task has been killed")
     }
 
+    // set data
     pub async fn set_data(&self, message: String) -> String {
         let (send, recv) = oneshot::channel();
         let msg = ActorMessage::SetData {
@@ -98,6 +106,9 @@ impl MyActorHandle {
             message
         };
 
+        // Ignore send errors. If this send fails, so does the
+        // recv.await below. There's no reason to check for the
+        // same failure twice.
         let _ = self.sender.send(msg).await;
         recv.await.expect("Actor task has been killed")
     }
