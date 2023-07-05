@@ -1,33 +1,35 @@
 use tokio::sync::{oneshot, mpsc};
-
 // The base actor, which our ActorHandle will be able to control. Holds data and an ID.
-struct MyActor {
+struct Actor {
     receiver: mpsc::Receiver<ActorMessage>,
     next_id: i32,
-    data: String
+    message: Option<String>,
+    alive: bool
 }
 
 // An enum which will hold a Sender from a oneshot channel.
 // This enum can also hold data (so for example if we want to change some data on the Actor)
-enum ActorMessage {
+pub enum ActorMessage {
     GetUniqueId {
         respond_to: oneshot::Sender<u32>,
     },
     GetData {
-        respond_to: oneshot::Sender<String>,
+        respond_to: oneshot::Sender<Option<String>>,
     },
     SetData {
-        respond_to: oneshot::Sender<String>,
-        message: String
-    }
+        respond_to: oneshot::Sender<Option<String>>,
+        message: Option<String>
+    },
+    Kill
 }
 
-impl MyActor {
+impl Actor {
     fn new(receiver: mpsc::Receiver<ActorMessage>) -> Self {
-        MyActor {
+        Self {
             receiver,
             next_id: 0,
-            data: "Hello world!".to_string()
+            message: None,
+            alive: true
         }
     }
 
@@ -39,36 +41,57 @@ impl MyActor {
                 let _ = respond_to.send(self.next_id.try_into().unwrap());
             }
             ActorMessage::GetData {respond_to} => {
-                let _ = respond_to.send(self.data.clone());
+                let _ = respond_to.send(self.message.clone());
             }
             ActorMessage::SetData {respond_to, message} => {
-                self.data = message;
-                let _ = respond_to.send(self.data.clone());
+                self.message = message;
+                let _ = respond_to.send(self.message.clone());
+            },
+            ActorMessage::Kill => {
+                self.alive = false;
             }
         }
     }
 }
 
 // run the actor - this is run in a separate thread when creating the ActorHandle
-async fn run_my_actor(mut actor: MyActor) {
+async fn run_my_actor(mut actor: Actor) {
     while let Some(msg) = actor.receiver.recv().await {
         actor.handle_message(msg);
+    }
+
+    if !actor.alive {
+        drop(actor);
+        println!("Actor was killed");
     }
 }
 
 #[derive(Clone)]
-pub struct MyActorHandle {
+pub struct ActorHandle {
     sender: mpsc::Sender<ActorMessage>,
+    alt_channel: Option<mpsc::Sender<ActorMessage>>
 }
 
-impl MyActorHandle {
+impl ActorHandle {
     // this creates the actor while creating the handle
     pub fn new() -> Self {
         let (sender, receiver) = mpsc::channel(8);
-        let actor = MyActor::new(receiver);
+        let actor = Actor::new(receiver);
         tokio::spawn(run_my_actor(actor));
 
-        Self { sender }
+        Self { sender, alt_channel: None }
+    }
+    
+    pub fn new_and_receives_from(alt_channel: mpsc::Sender<ActorMessage>) -> Self {
+        let (sender, receiver) = mpsc::channel(8);
+        let actor = Actor::new(receiver);
+        tokio::spawn(run_my_actor(actor));
+
+        Self { sender, alt_channel: Some(alt_channel) }
+    }
+
+    pub fn change_receives_from(mut self, alt_channel: mpsc::Sender<ActorMessage>) {
+        self.alt_channel = Some(alt_channel);
     }
 
     pub async fn get_unique_id(&self) -> u32 {
@@ -85,7 +108,7 @@ impl MyActorHandle {
     }
 
     // get data
-    pub async fn get_data(&self) -> String {
+    pub async fn get_data(&self) -> Option<String> {
         let (send, recv) = oneshot::channel();
         let msg = ActorMessage::GetData {
             respond_to: send,
@@ -99,11 +122,11 @@ impl MyActorHandle {
     }
 
     // set data
-    pub async fn set_data(&self, message: String) -> String {
+    pub async fn set_data(&self, message: String) -> Option<String> {
         let (send, recv) = oneshot::channel();
         let msg = ActorMessage::SetData {
             respond_to: send,
-            message
+            message: Some(message)
         };
 
         // Ignore send errors. If this send fails, so does the
@@ -112,21 +135,15 @@ impl MyActorHandle {
         let _ = self.sender.send(msg).await;
         recv.await.expect("Actor task has been killed")
     }
+
+    pub async fn kill_actor(&self) {
+        let _ = self.sender.send(ActorMessage::Kill).await;
+        println!("Actor was killed")
+    }
 }
 
-#[tokio::main]
-async fn main() {
-    let actor_handle = MyActorHandle::new();
-
-    let meme = actor_handle.get_unique_id().await;
-
-    println!("The unique id of this actor is: {}", meme);
-
-    let data = actor_handle.get_data().await;
-
-    println!("The message of this actor is: {data}");
-
-    let new_data = actor_handle.set_data("Hehe!".to_string()).await;
-
-    println!("The new message of this actor is: {new_data}");
+impl Default for ActorHandle {
+    fn default() -> Self {
+        Self::new()
+    }
 }
